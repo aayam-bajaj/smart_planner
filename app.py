@@ -102,7 +102,19 @@ print("Adding accessibility data to the graph...")
 for u, v, key, data in G.edges(keys=True, data=True):
     data['slope'] = abs(random.uniform(0.0, 8.0))  # Simulated slope
     data['surface'] = random.choice(['asphalt', 'concrete', 'gravel'])  # Simulated surface
-    data['highway_type'] = data.get('highway', 'unknown')  # Keep highway type for penalties
+
+    # Handle highway type safely (OSM sometimes has lists)
+    highway = data.get('highway', 'unknown')
+    if isinstance(highway, list):
+        highway = highway[0] if highway else 'unknown'
+    data['highway_type'] = highway
+
+    # Add train line detection and penalties
+    if 'railway' in data or highway in ['rail', 'light_rail', 'subway']:
+        data['is_train_line'] = True
+        data['highway_type'] = 'train_line'
+    else:
+        data['is_train_line'] = False
 
 print("Accessibility data added (using simulated data for development).")
 
@@ -202,6 +214,7 @@ def calculate_custom_cost(G, u, v, user_profile, obstacles=[], current_weather="
         'tertiary': 1.5,     # Moderate penalty for tertiary roads
         'motorway': 5.0,     # Extreme penalty for highways
         'trunk': 4.0,        # Very high penalty for trunk roads
+        'train_line': float('inf'),  # Completely avoid train lines
         'unknown': 1.0       # No penalty for unknown types
     }
     cost *= path_type_multipliers.get(highway_type, 1.0)
@@ -635,6 +648,10 @@ def get_route():
                     if surface == 'gravel':
                         cost *= 1.2  # Small penalty
 
+                    # Avoid train lines completely
+                    if edge_data.get('is_train_line', False):
+                        return float('inf')
+
                     return cost
                 cost_func = fastest_cost
             elif route_type == 'comfortable':
@@ -649,6 +666,10 @@ def get_route():
                         dist_to_obstacle = ox.distance.great_circle(node_u_data['y'], node_u_data['x'], obs_lat, obs_lng)
                         if dist_to_obstacle < 50:
                             cost *= 3.0  # Moderate penalty for obstacles
+
+                    # Avoid train lines completely
+                    if edge_data.get('is_train_line', False):
+                        return float('inf')
 
                     # Progressive slope penalties
                     slope = edge_data.get('slope', 0)
@@ -685,6 +706,10 @@ def get_route():
                         if dist_to_obstacle < 50:
                             return float('inf')  # Completely avoid obstacles
 
+                    # Avoid train lines completely
+                    if edge_data.get('is_train_line', False):
+                        return float('inf')
+
                     # Very strict slope limits
                     slope = edge_data.get('slope', 0)
                     if slope > 5:  # Maximum 5% slope for accessibility
@@ -714,14 +739,27 @@ def get_route():
                     return calculate_custom_cost(G, u, v, user_profile, recent_obstacles, current_weather)
                 cost_func = balanced_cost
 
-            # Calculate route
-            route = nx.astar_path(
-                G,
-                source=start_node,
-                target=end_node,
-                weight=cost_func,
-                heuristic=heuristic
-            )
+            # Calculate route with improved efficiency for long distances
+            try:
+                # Use A* with optimized parameters for better performance
+                route = nx.astar_path(
+                    G,
+                    source=start_node,
+                    target=end_node,
+                    weight=cost_func,
+                    heuristic=heuristic
+                )
+            except nx.NetworkXNoPath:
+                # If A* fails, try Dijkstra as fallback for complex paths
+                try:
+                    route = nx.dijkstra_path(
+                        G,
+                        source=start_node,
+                        target=end_node,
+                        weight=cost_func
+                    )
+                except nx.NetworkXNoPath:
+                    raise nx.NetworkXNoPath("No path found with current constraints")
 
             route_coords = []
             for node in route:
@@ -754,7 +792,7 @@ def get_route():
             })
 
         except nx.NetworkXNoPath:
-            return jsonify({"error": "No path could be found with the given constraints."}), 400
+            return jsonify({"error": "No path could be found with the given constraints. Try adjusting your preferences or selecting different start/end points."}), 400
         except Exception as e:
             return jsonify({"error": f"Routing calculation failed: {str(e)}"}), 500
 

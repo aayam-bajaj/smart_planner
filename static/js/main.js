@@ -24,6 +24,7 @@ let startMarker = null;
 let endMarker = null;
 let routeLines = []; // Array to hold multiple route lines
 let currentRoutes = {}; // Store current route data
+let visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']); // Track which routes are visible
 
 // --- NEW: Event listeners for the interactive controls ---
 const slopeSlider = document.getElementById('slope');
@@ -43,6 +44,12 @@ document.getElementById('calculate-routes').addEventListener('click', calculateA
 
 // Add event listener for save profile button
 document.getElementById('save-profile').addEventListener('click', saveCurrentProfile);
+
+// Add event listeners for route selection buttons
+document.getElementById('show-fastest').addEventListener('click', () => toggleRouteVisibility('fastest'));
+document.getElementById('show-comfortable').addEventListener('click', () => toggleRouteVisibility('comfortable'));
+document.getElementById('show-accessible').addEventListener('click', () => toggleRouteVisibility('accessible'));
+document.getElementById('show-all').addEventListener('click', showAllRoutes);
 
 // Load profiles on page load
 document.addEventListener('DOMContentLoaded', loadProfiles);
@@ -100,6 +107,7 @@ function clearAllRoutes() {
     });
     routeLines = [];
     currentRoutes = {};
+    visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
 
     // Don't clear markers here - they should persist for recalculation
     // Hide route comparison
@@ -203,6 +211,9 @@ async function calculateAllRoutes() {
 
     // Display route comparison
     displayRouteComparison(routeStats);
+
+    // Initially show all routes
+    updateRouteVisibility();
 
     // Fit map to show all routes
     if (routeLines.length > 0) {
@@ -371,4 +382,45 @@ async function deleteProfile(profileId) {
 async function handleRouteCalculation() {
     // This function is now only used for marker dragging
     // The actual route calculation is handled by calculateAllRoutes()
+}
+
+function toggleRouteVisibility(routeType) {
+    if (visibleRoutes.has(routeType)) {
+        visibleRoutes.delete(routeType);
+    } else {
+        visibleRoutes.add(routeType);
+    }
+    updateRouteVisibility();
+}
+
+function showAllRoutes() {
+    visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
+    updateRouteVisibility();
+}
+
+function updateRouteVisibility() {
+    Object.keys(currentRoutes).forEach(routeType => {
+        const routeData = currentRoutes[routeType];
+        if (visibleRoutes.has(routeType)) {
+            if (!map.hasLayer(routeData.line)) {
+                routeData.line.addTo(map);
+            }
+        } else {
+            if (map.hasLayer(routeData.line)) {
+                map.removeLayer(routeData.line);
+            }
+        }
+    });
+
+    // Update button styles to show active state
+    document.querySelectorAll('.route-btn').forEach(btn => {
+        const routeType = btn.dataset.route;
+        if (visibleRoutes.has(routeType)) {
+            btn.style.opacity = '1';
+            btn.style.fontWeight = 'bold';
+        } else {
+            btn.style.opacity = '0.5';
+            btn.style.fontWeight = 'normal';
+        }
+    });
 }
