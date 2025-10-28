@@ -55,6 +55,28 @@
             </div>
         </div>
 
+        <div class="control-group">
+            <button id="save-profile" style="margin-top: 10px; padding: 6px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Save as Profile</button>
+        </div>
+
+        <h4 style="margin-top: 20px;">Saved Profiles</h4>
+        <div id="profile-list" style="max-height: 200px; overflow-y: auto;">
+            <p style="font-size: 12px; color: #666;">Loading profiles...</p>
+        </div>
+
+        <h4 style="margin-top: 20px;">Route Comparison</h4>
+        <div class="control-group">
+            <p style="font-size: 12px; color: #666; margin: 5px 0;">Click "Calculate Routes" to compare all three route options simultaneously.</p>
+        </div>
+
+        <button id="calculate-routes" style="margin-top: 15px; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">Calculate Routes</button>
+
+        <div id="route-comparison" style="margin-top: 15px; display: none;">
+            <h5>Route Comparison</h5>
+            <div id="route-stats"></div>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
