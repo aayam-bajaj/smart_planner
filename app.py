@@ -7,10 +7,10 @@ import random
 import sqlite3
 import time
 import joblib
-from datetime import datetime
+from datetime import datetime # <-- Make sure this is imported
 import pandas as pd
-import requests # <-- NEW IMPORT for API calls
-import json # <-- For JSON handling in database
+import requests 
+import json 
 
 app = Flask(__name__)
 
@@ -223,19 +223,19 @@ def calculate_custom_cost(G, u, v, user_profile, obstacles=[], current_weather="
     surface = edge_data.get('surface', 'asphalt')
     weather_penalties = {
         "Rain": {
-            "gravel": 4.0,      # Very slippery
-            "concrete": 1.5,    # Somewhat slippery
-            "asphalt": 1.2      # Less slippery but still wet
+            "gravel": 4.0,     # Very slippery
+            "concrete": 1.5,   # Somewhat slippery
+            "asphalt": 1.2     # Less slippery but still wet
         },
         "Snow": {
-            "gravel": 6.0,      # Extremely hazardous
-            "concrete": 3.0,    # Very slippery
-            "asphalt": 2.0      # Slippery
+            "gravel": 6.0,     # Extremely hazardous
+            "concrete": 3.0,   # Very slippery
+            "asphalt": 2.0     # Slippery
         },
         "Clear": {
-            "gravel": 1.0,      # Normal
-            "concrete": 1.0,    # Normal
-            "asphalt": 1.0      # Normal
+            "gravel": 1.0,     # Normal
+            "concrete": 1.0,   # Normal
+            "asphalt": 1.0     # Normal
         }
     }
 
@@ -491,7 +491,7 @@ def calculate_route_stats(G, route, obstacles, current_weather):
 
         # Surface
         surface = edge_data.get('surface', 'asphalt')
-        surface_counts[surface] += length
+        surface_counts[surface] = surface_counts.get(surface, 0) + length # Added .get for safety
 
         # Highway types
         highway_type = edge_data.get('highway_type', 'unknown')
@@ -559,7 +559,7 @@ def calculate_route_stats(G, route, obstacles, current_weather):
 
     # Highway type penalties (prefer pedestrian infrastructure)
     pedestrian_friendly_length = sum(length for ht, length in highway_counts.items()
-                                   if ht in ['footway', 'pedestrian', 'path'])
+                                     if ht in ['footway', 'pedestrian', 'path'])
     pedestrian_ratio = pedestrian_friendly_length / total_length if total_length > 0 else 0
     accessibility_score += pedestrian_ratio * 10  # Bonus for pedestrian infrastructure
 
@@ -773,12 +773,16 @@ def get_route():
             try:
                 conn = sqlite3.connect('database.db')
                 cursor = conn.cursor()
+                
+                # --- MODIFIED LINE: Added route_time and its value ---
                 cursor.execute('''
                     INSERT INTO route_history
-                    (start_lat, start_lng, end_lat, end_lng, route_length, weather_condition, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (start_lat, start_lng, end_lat, end_lng, route_length, route_time, weather_condition, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (start_point['lat'], start_point['lng'], end_point['lat'], end_point['lng'],
-                      route_stats['length'], current_weather, int(time.time())))
+                      route_stats['length'], route_stats['estimated_time'], current_weather, int(time.time())))
+                # --- END OF MODIFICATION ---
+                      
                 conn.commit()
                 conn.close()
             except Exception as e:
@@ -798,6 +802,126 @@ def get_route():
 
     except Exception as e:
         return jsonify({"error": f"Request processing failed: {str(e)}"}), 500
+
+# --- NEW: DASHBOARD ROUTES ---
+
+@app.route('/dashboard')
+def dashboard():
+    """Serves the main dashboard page."""
+    return render_template('dashboard.html')
+
+@app.route('/api/dashboard_stats')
+def get_dashboard_stats():
+    """Provides aggregate statistics for the dashboard."""
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+
+        # --- MODIFICATION: Updated KPIs to be more insightful ---
+        
+        # 1. Main KPIs
+        cursor.execute("SELECT COUNT(*), COALESCE(AVG(route_length), 0), COALESCE(AVG(route_time), 0) FROM route_history")
+        total_routes, avg_distance, avg_time = cursor.fetchone()
+
+        # 2. Routes Today
+        today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        cursor.execute("SELECT COUNT(*) FROM route_history WHERE created_at > ?", (today_start,))
+        routes_today = cursor.fetchone()[0]
+
+        # 3. Obstacles This Week
+        seven_days_ago = int(time.time()) - 7 * 86400
+        cursor.execute("SELECT COUNT(*) FROM obstacles WHERE reported_at > ?", (seven_days_ago,))
+        obstacles_week = cursor.fetchone()[0]
+
+        # 4. Total Profiles
+        cursor.execute("SELECT COUNT(*) FROM user_profiles")
+        total_profiles = cursor.fetchone()[0]
+        
+        # --- END MODIFICATION ---
+
+        # Routes by Day (for chart) - Last 7 days
+        cursor.execute("""
+            SELECT 
+                strftime('%Y-%m-%d', created_at, 'unixepoch') as date, 
+                COUNT(*) as count
+            FROM route_history
+            WHERE created_at > ?
+            GROUP BY date
+            ORDER BY date ASC
+        """, (seven_days_ago,)) # Re-use seven_days_ago
+        
+        routes_by_day = cursor.fetchall()
+        
+        # --- REMOVED Weather Query ---
+
+        conn.close()
+
+        # Format chart data
+        chart_labels = [row[0] for row in routes_by_day]
+        chart_data = [row[1] for row in routes_by_day]
+        
+        # --- MODIFICATION: Updated KPI dictionary ---
+        return jsonify({
+            "kpis": {
+                "total_routes": total_routes,
+                "routes_today": routes_today,
+                "avg_distance_km": round(avg_distance / 1000, 2),
+                "avg_time_min": round(avg_time, 1),
+                "obstacles_week": obstacles_week,
+                "total_profiles": total_profiles
+            },
+            "routes_by_day_chart": {
+                "labels": chart_labels,
+                "data": chart_data
+            }
+            # --- REMOVED weather_chart ---
+        })
+
+    except Exception as e:
+        print(f"Error getting dashboard stats: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/recent_routes')
+def get_recent_routes():
+    """Provides a list of the 10 most recent routes."""
+    try:
+        conn = sqlite3.connect('database.db')
+        cursor = conn.cursor()
+        
+        # --- MODIFICATION: Use COALESCE to handle NULL values in old rows ---
+        cursor.execute("""
+            SELECT start_lat, start_lng, end_lat, end_lng, 
+                   COALESCE(route_length, 0) as route_length, 
+                   COALESCE(route_time, 0) as route_time, 
+                   COALESCE(weather_condition, 'Unknown') as weather_condition, 
+                   created_at
+            FROM route_history
+            ORDER BY created_at DESC
+            LIMIT 10
+        """)
+        # --- END OF MODIFICATION ---
+        
+        routes = cursor.fetchall()
+        conn.close()
+        
+        recent_routes = []
+        for row in routes:
+            recent_routes.append({
+                "start": f"{round(row[0], 4)}, {round(row[1], 4)}",
+                "end": f"{round(row[2], 4)}, {round(row[3], 4)}",
+                "length_km": round(row[4] / 1000, 2),
+                "time_min": round(row[5], 1),
+                "weather": row[6],
+                "date": datetime.fromtimestamp(row[7]).strftime('%Y-%m-%d %H:%M')
+            })
+            
+        return jsonify(recent_routes)
+        
+    except Exception as e:
+        print(f"Error getting recent routes: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# --- END OF DASHBOARD ROUTES ---
 
 if __name__ == '__main__':
     app.run(debug=True)
