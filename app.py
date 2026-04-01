@@ -1,6 +1,6 @@
 # app.py
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, redirect, render_template, request, jsonify, url_for
 import osmnx as ox
 import networkx as nx
 import random
@@ -12,10 +12,49 @@ import pandas as pd
 import requests 
 import json 
 
+
+#login management
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
+import os
+
 app = Flask(__name__)
+#login manager
+# WEATHER_API_KEY = "237f996616f07b24d9dd1c174b5d6c48"
+app.secret_key = os.getenv("SECRET_KEY", "change-this-secret")
+app.config["SECRET_KEY"] = "super-secret-key"
+app.secret_key = app.config["SECRET_KEY"]
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+class User(UserMixin):
+    def __init__(self, row):
+        self.id = row["id"]
+        self.name = row["name"]
+        self.email = row["email"]
+        self.is_admin = row["is_admin"]
+        self.max_slope = row["max_slope"]
+        self.comfort_weight = row["comfort_weight"]
+        self.disliked_surfaces = json.loads(row["disliked_surfaces"] or "[]")
+        self.route_type = row["route_type"]
+
+@login_manager.user_loader
+def load_user(user_id):
+    conn = sqlite3.connect("database.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return User(row) if row else None
+
 
 # --- NEW: ADD YOUR API KEY HERE (Phase 5) ---
-WEATHER_API_KEY = "237f996616f07b24d9dd1c174b5d6c48" # <-- PASTE YOUR KEY FROM OPENWEATHERMAP
+WEATHER_API_KEY = "237f996616f07b24d9dd1c174b5d6c48" # 
 # ----------------------------------------------
 
 # --- Load the pre-trained ML model (Phase 4) ---
@@ -57,20 +96,20 @@ def init_db():
 
     # New route_history table
     conn.execute('''
-        CREATE TABLE IF NOT EXISTS route_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_profile_id INTEGER,
-            start_lat REAL NOT NULL,
-            start_lng REAL NOT NULL,
-            end_lat REAL NOT NULL,
-            end_lng REAL NOT NULL,
-            route_length REAL,
-            route_time REAL,
-            weather_condition TEXT,
-            created_at INTEGER NOT NULL,
-            FOREIGN KEY (user_profile_id) REFERENCES user_profiles (id)
-        );
-    ''')
+    CREATE TABLE IF NOT EXISTS route_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        start_lat REAL NOT NULL,
+        start_lng REAL NOT NULL,
+        end_lat REAL NOT NULL,
+        end_lng REAL NOT NULL,
+        route_length REAL,
+        route_time REAL,
+        weather_condition TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    );
+''')
 
     # New ml_training_data table
     conn.execute('''
@@ -85,10 +124,40 @@ def init_db():
         );
     ''')
 
+    #new user 
+    conn.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        is_admin INTEGER DEFAULT 0,
+        max_slope REAL DEFAULT 6.0,
+        comfort_weight REAL DEFAULT 0.5,
+        disliked_surfaces TEXT DEFAULT '[]',
+        route_type TEXT DEFAULT 'balanced',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+''')
+
     print("All tables created successfully")
     conn.close()
 
 init_db()
+def migrate_db():
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+
+    try:
+        cur.execute("ALTER TABLE route_history ADD COLUMN user_id INTEGER")
+    except:
+        pass
+
+    conn.commit()
+    conn.close()
+
+migrate_db()
 
 # --- Load map data and add simulated accessibility data ---
 place_name = "Navi Mumbai, Maharashtra, India"
@@ -128,10 +197,24 @@ def get_recent_obstacles():
     return obstacles
 
 # --- NEW: HELPER FUNCTION TO GET WEATHER (Phase 5) ---
+# import os
+
+# WEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
+
 def get_current_weather(api_key, city_name="Navi Mumbai"):
-    """Fetches the current primary weather condition."""
-    if not api_key or api_key == "237f996616f07b24d9dd1c174b5d6c48":
-        print("Weather API key not set. Skipping weather check.")
+    if not api_key:
+        return "Unknown"
+
+    base_url = "http://api.openweathermap.org/data/2.5/weather?"
+    complete_url = f"{base_url}q={city_name}&appid={api_key}"
+
+    try:
+        response = requests.get(complete_url, timeout=10)
+        data = response.json()
+        if data.get("cod") != 200:
+            return "Unknown"
+        return data["weather"][0]["main"]
+    except Exception:
         return "Unknown"
 
     base_url = "http://api.openweathermap.org/data/2.5/weather?"
@@ -177,101 +260,359 @@ def calculate_slope(elev1, elev2, distance):
         return 0.0
     return abs((elev2 - elev1) / distance) * 100
 
-# --- ADVANCED COST FUNCTION WITH PATH TYPE PENALTIES (Phase 4) ---
-def calculate_custom_cost(G, u, v, user_profile, obstacles=[], current_weather="Unknown"):
-    edge_data = G.get_edge_data(u, v)[0]
+from shapely.geometry import LineString
+import math
 
+def best_edge_attr(edge_data):
+    """
+    Supports both:
+    - single edge attr dict
+    - MultiDiGraph edge dict {key: attr_dict}
+    """
+    if not edge_data:
+        return {}
+
+    # Single-edge attr dict
+    if "length" in edge_data or "geometry" in edge_data or "highway" in edge_data:
+        return edge_data
+
+    # Multi-edge dict
+    candidates = [v for v in edge_data.values() if isinstance(v, dict)]
+    if not candidates:
+        return {}
+
+    return min(candidates, key=lambda a: a.get("length", float("inf")))
+
+
+def get_best_edge_data(G, u, v):
+    edge_data = G.get_edge_data(u, v)
+    if not edge_data:
+        return {}
+
+    # If this is already a flat attribute dict
+    if isinstance(edge_data, dict) and ("length" in edge_data or "geometry" in edge_data or "highway" in edge_data):
+        return edge_data
+
+    # MultiDiGraph case: choose the shortest edge
+    candidates = [attr for attr in edge_data.values() if isinstance(attr, dict)]
+    if not candidates:
+        return {}
+
+    return min(candidates, key=lambda a: a.get("length", float("inf")))
+
+
+def edge_to_coords(G, u, v):
+    data = get_best_edge_data(G, u, v)
+    if not data:
+        pu = G.nodes[u]
+        pv = G.nodes[v]
+        return [(pu["y"], pu["x"]), (pv["y"], pv["x"])]
+
+    geom = data.get("geometry")
+    if geom is not None and hasattr(geom, "coords"):
+        return [(lat, lng) for lng, lat in geom.coords]
+
+    pu = G.nodes[u]
+    pv = G.nodes[v]
+    return [(pu["y"], pu["x"]), (pv["y"], pv["x"])]
+
+
+def route_to_coords(G, route):
+    coords = []
+    if not route or len(route) < 2:
+        return coords
+
+    for i in range(len(route) - 1):
+        seg = edge_to_coords(G, route[i], route[i + 1])
+        if not seg:
+            continue
+
+        if coords and coords[-1] == seg[0]:
+            coords.extend(seg[1:])
+        else:
+            coords.extend(seg)
+
+    return coords
+
+
+def build_route_segments(G, route):
+    segments = []
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        edge_data = get_best_edge_data(G, u, v)
+        if not edge_data:
+            continue
+
+        node_u = G.nodes[u]
+        node_v = G.nodes[v]
+
+        segments.append({
+            "index": i + 1,
+            "from": {"lat": node_u["y"], "lng": node_u["x"]},
+            "to": {"lat": node_v["y"], "lng": node_v["x"]},
+            "length": float(edge_data.get("length", 0)),
+            "surface": edge_data.get("surface", "unknown"),
+            "highway_type": edge_data.get("highway_type", "unknown"),
+            "slope": float(edge_data.get("slope", 0)),
+            "is_train_line": bool(edge_data.get("is_train_line", False))
+        })
+    return segments
+
+
+def get_route_bounds(route_coords):
+    if not route_coords:
+        return None
+
+    lats = [p[0] for p in route_coords]
+    lngs = [p[1] for p in route_coords]
+
+    return {
+        "south": min(lats),
+        "west": min(lngs),
+        "north": max(lats),
+        "east": max(lngs)
+    }
+
+# --- ADVANCED COST FUNCTION WITH PATH TYPE PENALTIES (Phase 4) ---
+def calculate_custom_cost(G, u, v, user_profile, obstacles=None, current_weather="Unknown"):
+    if obstacles is None:
+        obstacles = []
+
+    edge_data = get_best_edge_data(G, u, v)
+    if not edge_data:
+        return float("inf")
+
+    # Base cost
+    cost = edge_data.get("length", 0)
+
+    # Hard block only for very close obstacles
     node_u_data = G.nodes[u]
     for obs_lat, obs_lng in obstacles:
-        dist_to_obstacle = ox.distance.great_circle(node_u_data['y'], node_u_data['x'], obs_lat, obs_lng)
-        if dist_to_obstacle < 50:
-            return float('inf')
+        dist = ox.distance.great_circle(node_u_data["y"], node_u_data["x"], obs_lat, obs_lng)
+        if dist < 40:
+            return float("inf")
 
-    cost = edge_data.get('length', 0)
-
-    # --- ML-based obstacle prediction ---
+    # ML risk, but kept moderate
     if predictor_model:
         now = datetime.now()
-        hour = now.hour
-        day_of_week = now.weekday()
-        is_rush_hour = 1 if (7 <= hour <= 9) or (17 <= hour <= 19) else 0
-        is_weekend = 1 if day_of_week >= 5 else 0
-        feature_names = ['hour', 'day_of_week', 'is_rush_hour', 'is_weekend']
-        features = pd.DataFrame([[hour, day_of_week, is_rush_hour, is_weekend]], columns=feature_names)
-        predicted_prob = predictor_model.predict_proba(features)[0][1]
-        cost *= (1 + predicted_prob * 5.0)
+        features = pd.DataFrame([[
+            now.hour,
+            now.weekday(),
+            1 if (7 <= now.hour <= 9 or 17 <= now.hour <= 19) else 0,
+            1 if now.weekday() >= 5 else 0
+        ]], columns=["hour", "day_of_week", "is_rush_hour", "is_weekend"])
 
-    # --- Path Type Penalties (OSM highway tags) ---
-    highway_type = edge_data.get('highway_type', 'unknown')
-    path_type_multipliers = {
-        'footway': 0.8,      # Prefer pedestrian paths
-        'pedestrian': 0.8,   # Prefer pedestrian zones
-        'path': 0.9,         # Slightly prefer generic paths
-        'residential': 1.2,  # Small penalty for residential streets
-        'living_street': 1.1, # Slight penalty for living streets
-        'primary': 2.0,      # Heavy penalty for major roads
-        'secondary': 1.8,    # High penalty for secondary roads
-        'tertiary': 1.5,     # Moderate penalty for tertiary roads
-        'motorway': 5.0,     # Extreme penalty for highways
-        'trunk': 4.0,        # Very high penalty for trunk roads
-        'train_line': float('inf'),  # Completely avoid train lines
-        'unknown': 1.0       # No penalty for unknown types
+        prob = predictor_model.predict_proba(features)[0][1]
+        cost *= (1 + prob * 1.2)
+
+    highway = edge_data.get("highway_type", "unknown")
+    path_penalty = {
+        "footway": 0.8,
+        "pedestrian": 0.8,
+        "path": 0.9,
+        "residential": 1.2,
+        "living_street": 1.1,
+        "primary": 2.0,
+        "secondary": 1.7,
+        "tertiary": 1.4,
+        "motorway": 5.0,
+        "trunk": 4.0,
+        "train_line": float("inf"),
+        "unknown": 1.0
     }
-    cost *= path_type_multipliers.get(highway_type, 1.0)
+    cost *= path_penalty.get(highway, 1.0)
 
-    # --- Enhanced Weather Penalties ---
-    surface = edge_data.get('surface', 'asphalt')
-    weather_penalties = {
-        "Rain": {
-            "gravel": 4.0,     # Very slippery
-            "concrete": 1.5,   # Somewhat slippery
-            "asphalt": 1.2     # Less slippery but still wet
-        },
-        "Snow": {
-            "gravel": 6.0,     # Extremely hazardous
-            "concrete": 3.0,   # Very slippery
-            "asphalt": 2.0     # Slippery
-        },
-        "Clear": {
-            "gravel": 1.0,     # Normal
-            "concrete": 1.0,   # Normal
-            "asphalt": 1.0     # Normal
-        }
+    surface = edge_data.get("surface", "asphalt")
+    weather_penalty = {
+        "Rain": {"gravel": 3.0, "concrete": 1.3, "asphalt": 1.1},
+        "Snow": {"gravel": 5.0, "concrete": 2.5, "asphalt": 1.8},
+        "Clear": {"gravel": 1.0, "concrete": 1.0, "asphalt": 1.0}
     }
+    cost *= weather_penalty.get(current_weather, weather_penalty["Clear"]).get(surface, 1.0)
 
-    weather_surface_penalties = weather_penalties.get(current_weather, weather_penalties["Clear"])
-    cost *= weather_surface_penalties.get(surface, 1.0)
+    slope = edge_data.get("slope", 0)
+    max_slope = user_profile.get("max_slope", 6)
 
-    # --- Slope penalties ---
-    max_slope = user_profile.get('max_slope', 6)
-    slope = edge_data.get('slope', 0)
+    # Do not kill the route for normal slope differences
     if slope > max_slope:
-        cost *= 10  # Impassable
+        cost *= 4.0 + ((slope - max_slope) * 0.5)
+    else:
+        cost *= (1 + slope / 12)
 
-    # --- Surface preferences ---
-    disliked_surfaces = user_profile.get('disliked_surfaces', [])
-    if isinstance(disliked_surfaces, str):
-        # Handle case where it's stored as JSON string
+    disliked = user_profile.get("disliked_surfaces", [])
+    if isinstance(disliked, str):
         try:
-            disliked_surfaces = json.loads(disliked_surfaces)
-        except:
-            disliked_surfaces = []
-    # Ensure it's a list
-    if not isinstance(disliked_surfaces, list):
-        disliked_surfaces = []
-    if surface in disliked_surfaces:
+            disliked = json.loads(disliked)
+        except Exception:
+            disliked = []
+
+    if surface in disliked:
         cost *= 2.0
 
-    # --- Comfort weighting ---
-    comfort_pref = user_profile.get('comfort_weight', 0.5)
-    cost += cost * slope * comfort_pref * 0.1
+    comfort = user_profile.get("comfort_weight", 0.5)
+    cost *= (1 + comfort * slope / 8)
 
     return cost
 
 # --- Flask Routes ---
-@app.route('/')
-def index():
-    return render_template('index.html')
+# @app.route('/')
+# def index():
+#     return render_template('index.html')
+
+
+
+#routes for login
+@app.route("/")
+def home():
+    if current_user.is_authenticated:
+        return redirect(url_for("map_page"))
+    return redirect(url_for("login"))
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template("register.html")
+
+    if request.is_json:
+          data = request.get_json()
+          disliked_surfaces = data.get("disliked_surfaces", [])
+    else:
+        data = request.form
+        disliked_surfaces = request.form.getlist("disliked_surfaces")
+
+    
+
+    name = data.get("name")
+    email = data.get("email")
+    password = data.get("password")
+    max_slope = float(data.get("max_slope", 6.0))
+    comfort_weight = float(data.get("comfort_weight", 0.5))
+   # disliked_surfaces = data.get("disliked_surfaces", [])
+    route_type = data.get("route_type", "balanced")
+    print("REGISTER DATA:", data)
+    print("SURFACES:", disliked_surfaces)
+
+    if isinstance(disliked_surfaces, str):
+        try:
+            disliked_surfaces = json.loads(disliked_surfaces)
+        except:
+            disliked_surfaces = []
+
+    if not name or not email or not password:
+        if request.is_json:
+            return jsonify({"error": "Name, email and password are required"}), 400
+        return render_template("register.html", error="Name, email and password are required"), 400
+
+    conn = sqlite3.connect("database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE email = ?", (email,))
+    if cur.fetchone():
+        conn.close()
+        if request.is_json:
+            return jsonify({"error": "Email already registered"}), 400
+        return render_template("register.html", error="Email already registered"), 400
+
+    now = int(time.time())
+    password_hash = generate_password_hash(password)
+
+    cur.execute("""
+        INSERT INTO users
+        (name, email, password_hash, max_slope, comfort_weight, disliked_surfaces, route_type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        name, email, password_hash, max_slope, comfort_weight,
+        json.dumps(disliked_surfaces), route_type, now, now
+    ))
+
+    conn.commit()
+    conn.close()
+
+    if request.is_json:
+        return jsonify({"success": True, "redirect": url_for("login")})
+
+    return redirect(url_for("login"))
+
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template("login.html")
+
+    data = request.get_json(silent=True) if request.is_json else request.form
+    email = data.get("email")
+    password = data.get("password")
+
+    conn = sqlite3.connect("database.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE email = ?", (email,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row or not check_password_hash(row["password_hash"], password):
+        if request.is_json:
+            return jsonify({"error": "Invalid email or password"}), 401
+        return render_template("login.html", error="Invalid email or password"), 401
+
+    user = User(row)
+    login_user(user)
+
+    if request.is_json:
+        return jsonify({"success": True, "redirect": url_for("map_page")})
+
+    return redirect(url_for("map_page"))
+
+
+@app.route("/map")
+@login_required
+def map_page():
+    return render_template("index.html")
+
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+
+
+
+
+@app.route("/api/me")
+def api_me():
+    if not current_user.is_authenticated:
+        return jsonify({"authenticated": False}), 401
+
+    return jsonify({
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "is_admin": bool(current_user.is_admin),
+        "max_slope": current_user.max_slope,
+        "comfort_weight": current_user.comfort_weight,
+        "disliked_surfaces": current_user.disliked_surfaces,
+        "route_type": current_user.route_type,
+        "authenticated": True
+    })
+
+
+#admin dashboard
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return redirect(url_for("map_page"))
+        return fn(*args, **kwargs)
+    return wrapper
+
+@app.route("/admin/dashboard")
+@login_required
+@admin_required
+def admin_dashboard():
+    return render_template("admin_dashboard.html")
 
 @app.route('/create_profile', methods=['POST'])
 def create_profile():
@@ -282,7 +623,7 @@ def create_profile():
 
         profile_name = data.get('profile_name')
         max_slope = data.get('max_slope', 6.0)
-        disliked_surfaces = data.get('disliked_surfaces', [])
+        disliked_surfaces = request.form.getlist("disliked_surfaces")
         comfort_weight = data.get('comfort_weight', 0.5)
 
         if not profile_name:
@@ -478,7 +819,9 @@ def calculate_route_stats(G, route, obstacles, current_weather):
 
     for i in range(len(route) - 1):
         u, v = route[i], route[i + 1]
-        edge_data = G.get_edge_data(u, v)[0]
+        edge_data = get_best_edge_data(G, u, v)
+        if not edge_data:
+              continue
 
         # Length
         length = edge_data.get('length', 0)
@@ -586,6 +929,13 @@ def get_route():
         start_point = data.get('start')
         end_point = data.get('end')
         user_profile = data.get('profile', {})
+
+        if current_user.is_authenticated:
+                  user_profile = {
+        "max_slope": current_user.max_slope,
+        "comfort_weight": current_user.comfort_weight,
+        "disliked_surfaces": current_user.disliked_surfaces
+    }
         route_type = data.get('route_type', 'balanced')  # fastest, comfortable, accessible, balanced
         profile_id = data.get('profile_id')  # Optional: use saved profile
 
@@ -637,102 +987,96 @@ def get_route():
 
         try:
             # Choose cost function based on route type
-            if route_type == 'fastest':
-                # Pure distance-based routing with slight preference for better surfaces
+            if route_type == "fastest":
                 def fastest_cost(u, v, d):
-                    edge_data = G.get_edge_data(u, v)[0]
-                    cost = edge_data.get('length', 0)
+                    edge_data = get_best_edge_data(G, u, v)
+                    if not edge_data:
+                        return float("inf")
 
-                    # Minor penalty for very bad surfaces to avoid complete inaccessibility
-                    surface = edge_data.get('surface', 'asphalt')
-                    if surface == 'gravel':
-                        cost *= 1.2  # Small penalty
+                    if edge_data.get("is_train_line", False):
+                        return float("inf")
 
-                    # Avoid train lines completely
-                    if edge_data.get('is_train_line', False):
-                        return float('inf')
-
+                    cost = edge_data.get("length", 0)
+                    if edge_data.get("surface", "asphalt") == "gravel":
+                        cost *= 1.15
                     return cost
+
                 cost_func = fastest_cost
-            elif route_type == 'comfortable':
-                # Prioritize low slope and good surfaces
+
+            elif route_type == "comfortable":
                 def comfortable_cost(u, v, d):
-                    edge_data = G.get_edge_data(u, v)[0]
-                    cost = edge_data.get('length', 0)
+                    edge_data = get_best_edge_data(G, u, v)
+                    if not edge_data:
+                        return float("inf")
 
-                    # Check for obstacles first
-                    node_u_data = G.nodes[u]
-                    for obs_lat, obs_lng in recent_obstacles:
-                        dist_to_obstacle = ox.distance.great_circle(node_u_data['y'], node_u_data['x'], obs_lat, obs_lng)
-                        if dist_to_obstacle < 50:
-                            cost *= 3.0  # Moderate penalty for obstacles
+                    if edge_data.get("is_train_line", False):
+                        return float("inf")
 
-                    # Avoid train lines completely
-                    if edge_data.get('is_train_line', False):
-                        return float('inf')
+                    cost = edge_data.get("length", 0)
 
-                    # Progressive slope penalties
-                    slope = edge_data.get('slope', 0)
+                    slope = edge_data.get("slope", 0)
                     if slope > 8:
-                        cost *= 5.0  # Very steep
+                        cost *= 3.0
                     elif slope > 5:
-                        cost *= 2.5  # Moderately steep
+                        cost *= 2.0
                     elif slope > 3:
-                        cost *= 1.5  # Slightly steep
+                        cost *= 1.35
 
-                    # Surface penalties
-                    surface = edge_data.get('surface', 'asphalt')
-                    if surface == 'gravel':
-                        cost *= 2.5
-                    elif surface == 'concrete':
-                        cost *= 1.2  # Slight penalty for concrete vs asphalt
+                    surface = edge_data.get("surface", "asphalt")
+                    if surface == "gravel":
+                        cost *= 2.0
+                    elif surface == "concrete":
+                        cost *= 1.15
 
-                    # Weather impact
                     if current_weather == "Rain" and surface == "gravel":
-                        cost *= 4.0
+                        cost *= 2.5
 
-                    return cost
-                cost_func = comfortable_cost
-            elif route_type == 'accessible':
-                # Maximum accessibility - avoid obstacles, slopes, bad surfaces
-                def accessible_cost(u, v, d):
-                    edge_data = G.get_edge_data(u, v)[0]
-                    cost = edge_data.get('length', 0)
-
-                    # Check for obstacles - make them impassable
                     node_u_data = G.nodes[u]
                     for obs_lat, obs_lng in recent_obstacles:
-                        dist_to_obstacle = ox.distance.great_circle(node_u_data['y'], node_u_data['x'], obs_lat, obs_lng)
-                        if dist_to_obstacle < 50:
-                            return float('inf')  # Completely avoid obstacles
-
-                    # Avoid train lines completely
-                    if edge_data.get('is_train_line', False):
-                        return float('inf')
-
-                    # Very strict slope limits
-                    slope = edge_data.get('slope', 0)
-                    if slope > 5:  # Maximum 5% slope for accessibility
-                        return float('inf')  # Make impassable
-                    elif slope > 3:
-                        cost *= 3.0  # Heavy penalty
-                    elif slope > 2:
-                        cost *= 2.0  # Moderate penalty
-
-                    # Strict surface requirements
-                    surface = edge_data.get('surface', 'asphalt')
-                    if surface == 'gravel':
-                        return float('inf')  # Completely avoid gravel
-                    elif surface == 'concrete':
-                        cost *= 1.5  # Slight penalty for concrete
-
-                    # Weather impact - be extra careful in rain
-                    if current_weather == "Rain":
-                        if surface == "gravel":
-                            return float('inf')  # Never use gravel in rain
-                        cost *= 1.5  # General rain penalty
+                        dist_to_obstacle = ox.distance.great_circle(node_u_data["y"], node_u_data["x"], obs_lat, obs_lng)
+                        if dist_to_obstacle < 40:
+                            cost *= 2.5
 
                     return cost
+
+                cost_func = comfortable_cost
+
+            elif route_type == "accessible":
+                def accessible_cost(u, v, d):
+                    edge_data = get_best_edge_data(G, u, v)
+                    if not edge_data:
+                        return float("inf")
+
+                    if edge_data.get("is_train_line", False):
+                        return float("inf")
+
+                    cost = edge_data.get("length", 0)
+
+                    node_u_data = G.nodes[u]
+                    for obs_lat, obs_lng in recent_obstacles:
+                        dist_to_obstacle = ox.distance.great_circle(node_u_data["y"], node_u_data["x"], obs_lat, obs_lng)
+                        if dist_to_obstacle < 40:
+                            return float("inf")
+
+                    slope = edge_data.get("slope", 0)
+                    if slope > 10:
+                        cost *= 6.0
+                    elif slope > 5:
+                        cost *= 3.5
+                    elif slope > 3:
+                        cost *= 1.8
+
+                    surface = edge_data.get("surface", "asphalt")
+                    if surface == "gravel":
+                        cost *= 3.5
+                    elif surface == "concrete":
+                        cost *= 1.3
+
+                    if current_weather == "Rain":
+                        cost *= 1.4
+
+                    return cost
+
                 cost_func = accessible_cost
             else:  # balanced (default) - but since we removed balanced from frontend, this shouldn't be called
                 def balanced_cost(u, v, d):
@@ -761,38 +1105,47 @@ def get_route():
                 except nx.NetworkXNoPath:
                     raise nx.NetworkXNoPath("No path found with current constraints")
 
-            route_coords = []
-            for node in route:
-                point = G.nodes[node]
-                route_coords.append([point['y'], point['x']])
+            # route_coords = []
+            # for node in route:
+            #     point = G.nodes[node]
+            #     route_coords.append([point['y'], point['x']])
+            route_coords = route_to_coords(G, route)
 
-            # Calculate route statistics
+           # Calculate route statistics
             route_stats = calculate_route_stats(G, route, recent_obstacles, current_weather)
 
             # Store route in history
             try:
                 conn = sqlite3.connect('database.db')
                 cursor = conn.cursor()
-                
-                # --- MODIFIED LINE: Added route_time and its value ---
                 cursor.execute('''
-                    INSERT INTO route_history
-                    (start_lat, start_lng, end_lat, end_lng, route_length, route_time, weather_condition, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (start_point['lat'], start_point['lng'], end_point['lat'], end_point['lng'],
-                      route_stats['length'], route_stats['estimated_time'], current_weather, int(time.time())))
-                # --- END OF MODIFICATION ---
-                      
+    INSERT INTO route_history
+    (user_id, start_lat, start_lng, end_lat, end_lng, route_length, route_time, weather_condition, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+''', (
+    current_user.id if current_user.is_authenticated else None,
+                    start_point['lat'], start_point['lng'],
+                    end_point['lat'], end_point['lng'],
+                    route_stats['length'], route_stats['estimated_time'],
+                    current_weather, int(time.time())
+                ))
                 conn.commit()
                 conn.close()
             except Exception as e:
                 print(f"Could not save route history: {e}")
 
+            route_stats = calculate_route_stats(G, route, recent_obstacles, current_weather)
+
+            segments = build_route_segments(G, route)
+            route_bounds = get_route_bounds(route_coords)
+
             return jsonify({
-                'route': route_coords,
-                'stats': route_stats,
-                'route_type': route_type,
-                'weather': current_weather
+                "route": route_coords,
+                "stats": route_stats,
+                "route_type": route_type,
+                "weather": current_weather,
+                "segments": segments,
+                "bounds": route_bounds
             })
 
         except nx.NetworkXNoPath:
@@ -802,6 +1155,46 @@ def get_route():
 
     except Exception as e:
         return jsonify({"error": f"Request processing failed: {str(e)}"}), 500
+    
+
+#Helper function for routes
+def build_route_segments(G, route):
+    segments = []
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        edge_data = get_best_edge_data(G, u, v)
+        if not edge_data:
+              continue
+        node_u = G.nodes[u]
+        node_v = G.nodes[v]
+
+        segment = {
+            "index": i + 1,
+            "from": {"lat": node_u["y"], "lng": node_u["x"]},
+            "to": {"lat": node_v["y"], "lng": node_v["x"]},
+            "length": float(edge_data.get("length", 0)),
+            "surface": edge_data.get("surface", "unknown"),
+            "highway_type": edge_data.get("highway_type", "unknown"),
+            "slope": float(edge_data.get("slope", 0)),
+            "is_train_line": bool(edge_data.get("is_train_line", False))
+        }
+        segments.append(segment)
+    return segments
+
+
+def get_route_bounds(route_coords):
+    if not route_coords:
+        return None
+
+    lats = [p[0] for p in route_coords]
+    lngs = [p[1] for p in route_coords]
+
+    return {
+        "south": min(lats),
+        "west": min(lngs),
+        "north": max(lats),
+        "east": max(lngs)
+    }
 
 # --- NEW: DASHBOARD ROUTES ---
 

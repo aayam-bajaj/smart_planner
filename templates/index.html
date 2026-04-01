@@ -1,91 +1,90 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Smart Route Planner</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>
-        body { margin: 0; padding: 0; }
-        #map { height: 100vh; width: 100%; }
-        .info { padding: 6px 8px; font: 14px/16px Arial, Helvetica, sans-serif; background: white; background: rgba(255,255,255,0.8); box-shadow: 0 0 15px rgba(0,0,0,0.2); border-radius: 5px; }
-        .info h4 { margin: 0 0 5px; color: #777; }
-        .profile-controls {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            z-index: 1000; /* Ensures it's on top of the map */
-            background: rgba(255, 255, 255, 0.9);
-            padding: 10px;
-            border-radius: 5px;
-            box-shadow: 0 0 15px rgba(0,0,0,0.2);
-            font-family: Arial, Helvetica, sans-serif;
-            width: 200px;
-        }
-.profile-controls h4 {
-    margin-top: 0;
-    margin-bottom: 10px;
-    text-align: center;
-}
-.control-group {
-    margin-bottom: 10px;
-}
-.slider {
-    width: 100%;
-}
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Planner | Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100vh; width: 100%; }
+  </style>
 </head>
-<body>
-    <div id="map"></div>
-    <div class="profile-controls">
-        <a href="/dashboard" style="display: block; text-align: center; margin-bottom: 10px; font-size: 14px; color: #007bff; text-decoration: none;">📊 View Analytics Dashboard</a>
-        <h4>My Preferences</h4>
-        <div class="control-group">
-            <label for="slope">Max Slope (%): <span id="slopeValue">4</span>%</label>
-            <input type="range" id="slope" min="0" max="15" value="4" class="slider">
+<body class="bg-slate-100">
+  <div class="flex h-screen">
+    <aside class="w-[360px] bg-white border-r border-slate-200 p-5 overflow-y-auto">
+      <div class="mb-6">
+        <div class="text-sm text-slate-500">Logged in as</div>
+        <div class="text-2xl font-bold text-slate-900">{{ current_user.name }}</div>
+        <div class="mt-3 flex gap-2">
+          <a href="/logout" class="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm">Logout</a>
+          {% if current_user.is_admin %}
+          <a href="/admin/dashboard" class="px-4 py-2 rounded-xl border border-slate-300 text-sm">Admin Dashboard</a>
+          {% endif %}
         </div>
-        <div class="control-group">
-            <label for="comfort">Comfort Weight: <span id="comfortValue">0.8</span></label>
-            <input type="range" id="comfort" min="0" max="1" value="0.8" step="0.1" class="slider">
-        </div>
-        <div class="control-group">
-            <label>Disliked Surfaces:</label>
-            <div>
-                <input type="checkbox" id="gravel" name="surface" value="gravel" checked>
-                <label for="gravel">Gravel</label>
-            </div>
-        </div>
+      </div>
 
-        <div class="control-group">
-            <button id="save-profile" style="margin-top: 10px; padding: 6px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Save as Profile</button>
+      <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-4">
+        <h2 class="font-semibold text-slate-900 mb-3">Your Preferences</h2>
+
+        <label class="block text-sm mb-1">Max Slope: <span id="slopeValue">4</span>%</label>
+        <input id="slope" type="range" min="0" max="20" value="{{ current_user.max_slope or 4 }}" class="w-full">
+
+        <label class="block text-sm mb-1 mt-4">Comfort Weight: <span id="comfortValue">0.5</span></label>
+        <input id="comfort" type="range" min="0" max="1" step="0.1" value="{{ current_user.comfort_weight or 0.5 }}" class="w-full">
+
+        <label class="flex items-center gap-2 mt-4 text-sm">
+          <input id="gravel" type="checkbox" {% if 'gravel' in current_user.disliked_surfaces %}checked{% endif %}>
+          Avoid Gravel
+        </label>
+
+        <button id="save-profile" class="w-full mt-4 px-4 py-2 rounded-xl bg-emerald-500 text-white font-semibold">
+          Save as Profile
+        </button>
+      </div>
+
+      <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-4">
+        <h2 class="font-semibold text-slate-900 mb-3">Saved Profiles</h2>
+        <div id="profile-list">Loading...</div>
+      </div>
+
+      <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+        <h2 class="font-semibold text-slate-900 mb-3">Route Actions</h2>
+        <button id="calculate-routes" class="w-full px-4 py-2 rounded-xl bg-slate-900 text-white font-semibold mb-2">
+          Calculate Routes
+        </button>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="show-fastest" data-route="fastest" class="route-btn px-3 py-2 rounded-xl bg-slate-200 text-sm">Fastest</button>
+          <button id="show-comfortable" data-route="comfortable" class="route-btn px-3 py-2 rounded-xl bg-slate-200 text-sm">Comfortable</button>
+          <button id="show-accessible" data-route="accessible" class="route-btn px-3 py-2 rounded-xl bg-slate-200 text-sm">Accessible</button>
+          <button id="show-all" data-route="all" class="route-btn px-3 py-2 rounded-xl bg-slate-200 text-sm">Show All</button>
         </div>
-
-        <h4 style="margin-top: 20px;">Saved Profiles</h4>
-        <div id="profile-list" style="max-height: 200px; overflow-y: auto;">
-            <p style="font-size: 12px; color: #666;">Loading profiles...</p>
+        <div class="grid grid-cols-3 gap-2 mt-3">
+          <button id="zoom-all-btn" class="px-3 py-2 rounded-xl border border-slate-300 text-sm">Zoom All</button>
+          <button id="focus-fastest-btn" class="px-3 py-2 rounded-xl border border-slate-300 text-sm">Focus Fastest</button>
+          <button id="focus-comfortable-btn" class="px-3 py-2 rounded-xl border border-slate-300 text-sm">Focus Comfort</button>
         </div>
+        <button id="focus-accessible-btn" class="w-full mt-2 px-3 py-2 rounded-xl border border-slate-300 text-sm">Focus Accessible</button>
+      </div>
 
-        <h4 style="margin-top: 20px;">Route Comparison</h4>
-        <div class="control-group">
-            <p style="font-size: 12px; color: #666; margin: 5px 0;">Click "Calculate Routes" to compare all three route options simultaneously.</p>
+      <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mt-4">
+        <h2 class="font-semibold text-slate-900 mb-3">Route Details</h2>
+        <div id="route-comparison" style="display:none;">
+          <div id="route-stats"></div>
+          <div id="segment-list"></div>
         </div>
+      </div>
+    </aside>
 
-        <button id="calculate-routes" style="margin-top: 15px; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">Calculate Routes</button>
+    <main class="flex-1 relative">
+      <div id="map"></div>
+    </main>
+  </div>
 
-        <div id="route-comparison" style="margin-top: 15px; display: none;">
-            <h5>Route Comparison</h5>
-            <div id="route-stats"></div>
-            <div id="route-selection" style="margin-top: 10px;">
-                <h6>View Individual Routes:</h6>
-                <button id="show-fastest" class="route-btn" data-route="fastest" style="background: #ff4444; color: white; border: none; padding: 5px 10px; margin: 2px; border-radius: 3px; cursor: pointer;">🚀 Fastest</button>
-                <button id="show-comfortable" class="route-btn" data-route="comfortable" style="background: #44ff44; color: white; border: none; padding: 5px 10px; margin: 2px; border-radius: 3px; cursor: pointer;">🛋️ Comfortable</button>
-                <button id="show-accessible" class="route-btn" data-route="accessible" style="background: #4444ff; color: white; border: none; padding: 5px 10px; margin: 2px; border-radius: 3px; cursor: pointer;">♿ Accessible</button>
-                <button id="show-all" style="background: #666; color: white; border: none; padding: 5px 10px; margin: 2px; border-radius: 3px; cursor: pointer;">Show All</button>
-            </div>
-        </div>
-    </div>
-
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>
