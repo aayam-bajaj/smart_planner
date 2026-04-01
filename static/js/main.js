@@ -1,117 +1,162 @@
-// static/js/main.js (Final Version)
-
-// Initialize the map and set its view to Navi Mumbai
 const map = L.map('map').setView([19.0330, 73.0297], 13);
+map.whenReady(() => {
+    setTimeout(() => {
+        map.invalidateSize();
+    }, 100);
+});
 
-// Add a tile layer to the map
+map.getContainer().style.pointerEvents = 'auto';
+
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    attribution: '© OpenStreetMap contributors'
 }).addTo(map);
 
-// Add a small info box
-const info = L.control();
-info.onAdd = function (map) {
+const info = L.control({ position: 'topright' });
+info.onAdd = function () {
     this._div = L.DomUtil.create('div', 'info');
     this.update();
     return this._div;
 };
-info.update = function (props) {
-    this._div.innerHTML = '<h4>Smart Route Planner</h4>' + 'Click to select start and end points.';
+info.update = function (text = 'Click to select start and end points.') {
+    this._div.innerHTML = `<div style="background:white;padding:10px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);">${text}</div>`;
 };
 info.addTo(map);
 
 let startMarker = null;
 let endMarker = null;
-let routeLines = []; // Array to hold multiple route lines
-let currentRoutes = {}; // Store current route data
-let visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']); // Track which routes are visible
+let routeLayers = {
+    fastest: null,
+    comfortable: null,
+    accessible: null
+};
+let routeDataByType = {};
+let visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
 
-// --- NEW: Event listeners for the interactive controls ---
 const slopeSlider = document.getElementById('slope');
 const comfortSlider = document.getElementById('comfort');
 const slopeValue = document.getElementById('slopeValue');
 const comfortValue = document.getElementById('comfortValue');
 
-slopeSlider.addEventListener('input', () => {
-    slopeValue.textContent = slopeSlider.value;
-});
-comfortSlider.addEventListener('input', () => {
-    comfortValue.textContent = comfortSlider.value;
-});
+slopeSlider.addEventListener('input', () => slopeValue.textContent = slopeSlider.value);
+comfortSlider.addEventListener('input', () => comfortValue.textContent = comfortSlider.value);
 
-// Add event listener for calculate routes button
 document.getElementById('calculate-routes').addEventListener('click', calculateAllRoutes);
-
-// Add event listener for save profile button
 document.getElementById('save-profile').addEventListener('click', saveCurrentProfile);
 
-// Add event listeners for route selection buttons
 document.getElementById('show-fastest').addEventListener('click', () => toggleRouteVisibility('fastest'));
 document.getElementById('show-comfortable').addEventListener('click', () => toggleRouteVisibility('comfortable'));
 document.getElementById('show-accessible').addEventListener('click', () => toggleRouteVisibility('accessible'));
 document.getElementById('show-all').addEventListener('click', showAllRoutes);
 
-// Load profiles on page load
-document.addEventListener('DOMContentLoaded', loadProfiles);
-// --- End of New Listeners ---
+document.getElementById('zoom-all-btn').addEventListener('click', zoomAllRoutes);
+document.getElementById('focus-fastest-btn').addEventListener('click', () => focusRoute('fastest'));
+document.getElementById('focus-comfortable-btn').addEventListener('click', () => focusRoute('comfortable'));
+document.getElementById('focus-accessible-btn').addEventListener('click', () => focusRoute('accessible'));
 
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof loadProfiles === 'function') {
+        loadProfiles();
+    }
+});
 
-map.on('click', function(e) {
+document.addEventListener("DOMContentLoaded", async () => {
+    try {
+        const res = await fetch("/api/me");
+        if (!res.ok) return;
+
+        const me = await res.json();
+
+        if (document.getElementById("slope")) {
+            document.getElementById("slope").value = me.max_slope;
+            document.getElementById("slopeValue").textContent = me.max_slope;
+        }
+
+        if (document.getElementById("comfort")) {
+            document.getElementById("comfort").value = me.comfort_weight;
+            document.getElementById("comfortValue").textContent = me.comfort_weight;
+        }
+
+        if (document.getElementById("gravel")) {
+            document.getElementById("gravel").checked = me.disliked_surfaces.includes("gravel");
+        }
+
+        const userNameEl = document.getElementById("user-name");
+        if (userNameEl) userNameEl.textContent = me.name;
+    } catch (e) {
+        console.log("User profile not loaded");
+    }
+});
+
+map.on('click', function (e) {
+    console.log("Map clicked at:", e.latlng);
+
     if (!startMarker) {
         startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        startMarker.on('dragend', handleRouteCalculation);
+        startMarker.bindPopup('Start').openPopup();
+        info.update('Start selected. Now select end point.');
     } else if (!endMarker) {
         endMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        endMarker.on('dragend', handleRouteCalculation);
-        // Don't auto-calculate, wait for button press
+        endMarker.bindPopup('End').openPopup();
+        info.update('End selected. Click "Calculate Routes".');
     } else {
-        // Clear existing markers and routes
-        clearAllRoutes();
+        clearSelectionOnly();
         startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        endMarker = null;
-        startMarker.on('dragend', handleRouteCalculation);
+        startMarker.bindPopup('Start').openPopup();
+        info.update('Start reset. Select end point again.');
     }
 });
 
-map.on('contextmenu', async function(e) {
-    const description = prompt("Describe the obstacle (e.g., 'Construction blocking sidewalk'):");
-    if (description) {
-        try {
-            const response = await fetch('/report_obstacle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    lat: e.latlng.lat,
-                    lng: e.latlng.lng,
-                    description: description
-                })
-            });
-            const result = await response.json();
-            if (result.success) {
-                alert('Obstacle reported! It will be considered in routing for the next 24 hours.');
-                L.marker(e.latlng).addTo(map).bindPopup(description).openPopup();
-            }
-        } catch (error) {
-            console.error('Failed to report obstacle:', error);
+map.on('contextmenu', async function (e) {
+    const description = prompt("Describe the obstacle:");
+    if (!description) return;
+
+    try {
+        const response = await fetch('/report_obstacle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                lat: e.latlng.lat,
+                lng: e.latlng.lng,
+                description: description
+            })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            alert('Obstacle reported successfully.');
+            L.marker(e.latlng).addTo(map).bindPopup(description);
+        } else {
+            alert(result.error || 'Failed to report obstacle.');
         }
+    } catch (err) {
+        console.error(err);
+        alert('Failed to report obstacle.');
     }
 });
 
+function clearSelectionOnly() {
+    if (startMarker) {
+        map.removeLayer(startMarker);
+        startMarker = null;
+    }
+    if (endMarker) {
+        map.removeLayer(endMarker);
+        endMarker = null;
+    }
+}
 
 function clearAllRoutes() {
-    // Clear all route lines
-    routeLines.forEach(line => {
-        if (map.hasLayer(line)) {
-            map.removeLayer(line);
+    Object.values(routeLayers).forEach(layer => {
+        if (layer && map.hasLayer(layer)) {
+            map.removeLayer(layer);
         }
     });
-    routeLines = [];
-    currentRoutes = {};
+    routeLayers = { fastest: null, comfortable: null, accessible: null };
+    routeDataByType = {};
     visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
-
-    // Don't clear markers here - they should persist for recalculation
-    // Hide route comparison
     document.getElementById('route-comparison').style.display = 'none';
+    document.getElementById('route-stats').innerHTML = '';
+    document.getElementById('segment-list').innerHTML = '';
 }
 
 async function calculateAllRoutes() {
@@ -120,26 +165,13 @@ async function calculateAllRoutes() {
         return;
     }
 
-    // Recreate markers if they were cleared
-    if (!startMarker || !endMarker) {
-        alert('Markers were cleared. Please select start and end points again.');
-        return;
-    }
-
     clearAllRoutes();
-
-    // Re-add markers after clearing
-    if (startMarker) startMarker.addTo(map);
-    if (endMarker) endMarker.addTo(map);
 
     const startPoint = startMarker.getLatLng();
     const endPoint = endMarker.getLatLng();
 
-    // Get user profile
     const dislikedSurfaces = [];
-    if (document.getElementById('gravel').checked) {
-        dislikedSurfaces.push('gravel');
-    }
+    if (document.getElementById('gravel').checked) dislikedSurfaces.push('gravel');
 
     const userProfile = {
         max_slope: parseFloat(document.getElementById('slope').value),
@@ -149,239 +181,167 @@ async function calculateAllRoutes() {
 
     const routeTypes = ['fastest', 'comfortable', 'accessible'];
     const routeColors = {
-        'fastest': '#ff4444',      // Red
-        'comfortable': '#44ff44',  // Green
-        'accessible': '#4444ff'    // Blue
+        fastest: '#ef4444',
+        comfortable: '#22c55e',
+        accessible: '#2563eb'
     };
 
     const routeNames = {
-        'fastest': '🚀 Fastest',
-        'comfortable': '🛋️ Most Comfortable',
-        'accessible': '♿ Most Accessible'
+        fastest: 'Fastest',
+        comfortable: 'Most Comfortable',
+        accessible: 'Most Accessible'
     };
 
-    let routeStats = [];
+    const routeStats = [];
 
     for (const routeType of routeTypes) {
         try {
             const response = await fetch('/get_route', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     start: { lat: startPoint.lat, lng: startPoint.lng },
                     end: { lat: endPoint.lat, lng: endPoint.lng },
                     profile: userProfile,
                     route_type: routeType
-                }),
+                })
             });
 
+            const data = await response.json();
+
             if (!response.ok) {
-                const errorData = await response.json();
-                console.error(`Error calculating ${routeType} route:`, errorData.error);
+                console.error(`Error for ${routeType}:`, data.error);
                 continue;
             }
 
-            const data = await response.json();
-            const routeCoords = data.route;
-            const stats = data.stats;
+            if (!data.route || data.route.length < 2) {
+                console.warn(`No visible route for ${routeType}`);
+                continue;
+            }
 
-            // Create route line
-            const routeLine = L.polyline(routeCoords, {
+            const polyline = L.polyline(data.route, {
                 color: routeColors[routeType],
-                weight: 4,
-                opacity: 0.8
+                weight: 5,
+                opacity: 0.9
             }).addTo(map);
 
-            routeLines.push(routeLine);
-            currentRoutes[routeType] = { line: routeLine, coords: routeCoords, stats: stats };
+            polyline.on('click', () => focusRoute(routeType));
+
+            routeLayers[routeType] = polyline;
+            routeDataByType[routeType] = data;
 
             routeStats.push({
                 type: routeType,
                 name: routeNames[routeType],
                 color: routeColors[routeType],
-                stats: stats
+                stats: data.stats,
+                segments: data.segments || [],
+                bounds: data.bounds
             });
-
         } catch (error) {
-            console.error(`Failed to fetch ${routeType} route:`, error);
+            console.error(`Failed to calculate ${routeType} route:`, error);
         }
     }
 
-    // Display route comparison
     displayRouteComparison(routeStats);
-
-    // Initially show all routes
     updateRouteVisibility();
 
-    // Fit map to show all routes
-    if (routeLines.length > 0) {
-        const group = new L.featureGroup(routeLines);
-        map.fitBounds(group.getBounds());
-    }
+    clearSelectionOnly();
+    zoomAllRoutes();
+    info.update('Routes calculated. Use the buttons to zoom or focus a route.');
 }
 
 function displayRouteComparison(routeStats) {
     const comparisonDiv = document.getElementById('route-comparison');
     const statsDiv = document.getElementById('route-stats');
+    const segmentList = document.getElementById('segment-list');
 
     if (routeStats.length === 0) {
-        statsDiv.innerHTML = '<p>No routes could be calculated.</p>';
+        statsDiv.innerHTML = '<div>No routes could be calculated.</div>';
+        segmentList.innerHTML = '';
         comparisonDiv.style.display = 'block';
         return;
     }
 
-    let html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
-    html += '<tr style="background: #f0f0f0;"><th style="padding: 5px; text-align: left;">Route</th><th style="padding: 5px;">Distance</th><th style="padding: 5px;">Time</th><th style="padding: 5px;">Avg Slope</th><th style="padding: 5px;">Max Slope</th><th style="padding: 5px;">Obstacles</th><th style="padding: 5px;">Accessibility</th></tr>';
-
+    let html = '';
     routeStats.forEach(route => {
-        const stats = route.stats;
-        html += `<tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 5px;"><span style="color: ${route.color}; font-weight: bold;">${route.name}</span></td>
-            <td style="padding: 5px;">${(stats.length / 1000).toFixed(2)} km</td>
-            <td style="padding: 5px;">${stats.estimated_time} min</td>
-            <td style="padding: 5px;">${stats.avg_slope.toFixed(1)}%</td>
-            <td style="padding: 5px;">${stats.max_slope.toFixed(1)}%</td>
-            <td style="padding: 5px;">${stats.obstacle_count}</td>
-            <td style="padding: 5px;">${stats.accessibility_score}/100</td>
-        </tr>`;
+        const s = route.stats;
+        html += `
+            <div class="route-card" style="border-left: 5px solid ${route.color};">
+                <h3>${route.name}</h3>
+                <div>Distance: ${(s.length / 1000).toFixed(2)} km</div>
+                <div>Time: ${s.estimated_time} min</div>
+                <div>Average Slope: ${Number(s.avg_slope).toFixed(1)}%</div>
+                <div>Max Slope: ${Number(s.max_slope).toFixed(1)}%</div>
+                <div>Obstacles: ${s.obstacle_count}</div>
+                <div>Accessibility Score: ${s.accessibility_score}/100</div>
+                <div style="margin-top:10px;">
+                    <button class="route-btn" onclick="focusRoute('${route.type}')">Zoom To Route</button>
+                </div>
+            </div>
+        `;
     });
 
-    html += '</table>';
-
-    // Add surface breakdown
-    html += '<h5 style="margin-top: 10px; margin-bottom: 5px;">Surface Composition:</h5>';
-    routeStats.forEach(route => {
-        const stats = route.stats;
-        html += `<div style="margin-bottom: 5px;"><span style="color: ${route.color};">${route.name.split(' ')[1]}:</span> `;
-        const surfaces = Object.entries(stats.surface_breakdown).filter(([_, pct]) => pct > 0);
-        html += surfaces.map(([surface, pct]) => `${surface}: ${pct}%`).join(', ');
-        html += '</div>';
-    });
     statsDiv.innerHTML = html;
     comparisonDiv.style.display = 'block';
+    renderSegmentList(routeStats);
 }
 
-async function saveCurrentProfile() {
-    const profileName = prompt('Enter a name for this profile:');
-    if (!profileName || profileName.trim() === '') {
-        return;
-    }
+function renderSegmentList(routeStats) {
+    const segmentList = document.getElementById('segment-list');
+    let html = '<h3 style="margin-top:14px;">Segment Details</h3>';
 
-    const dislikedSurfaces = [];
-    if (document.getElementById('gravel').checked) {
-        dislikedSurfaces.push('gravel');
-    }
+    routeStats.forEach(route => {
+        html += `<div class="route-card"><h3>${route.name} Segments</h3>`;
 
-    const profileData = {
-        profile_name: profileName.trim(),
-        max_slope: parseFloat(document.getElementById('slope').value),
-        disliked_surfaces: dislikedSurfaces,
-        comfort_weight: parseFloat(document.getElementById('comfort').value)
-    };
-
-    try {
-        const response = await fetch('/create_profile', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(profileData),
-        });
-
-        const result = await response.json();
-        if (result.success) {
-            alert('Profile saved successfully!');
-            loadProfiles(); // Refresh the profile list
+        const segments = route.segments || [];
+        if (segments.length === 0) {
+            html += '<div class="segment-item">No segment data available.</div>';
         } else {
-            alert('Error saving profile: ' + result.error);
-        }
-    } catch (error) {
-        console.error('Failed to save profile:', error);
-        alert('Failed to save profile. Please try again.');
-    }
-}
-
-async function loadProfiles() {
-    try {
-        const response = await fetch('/get_profiles');
-        const data = await response.json();
-
-        const profileListDiv = document.getElementById('profile-list');
-        if (data.profiles && data.profiles.length > 0) {
-            let html = '';
-            data.profiles.forEach(profile => {
-                html += `<div style="margin-bottom: 8px; padding: 5px; border: 1px solid #ddd; border-radius: 3px;">
-                    <div style="font-weight: bold; font-size: 12px;">${profile.profile_name}</div>
-                    <div style="font-size: 11px; color: #666;">
-                        Max slope: ${profile.max_slope}%, Comfort: ${profile.comfort_weight}
+            segments.slice(0, 8).forEach(seg => {
+                html += `
+                    <div class="segment-item">
+                        <b>Segment ${seg.index}</b><br/>
+                        Type: ${seg.highway_type}<br/>
+                        Surface: ${seg.surface}<br/>
+                        Length: ${seg.length.toFixed(1)} m<br/>
+                        Slope: ${seg.slope.toFixed(1)}%
                     </div>
-                    <button onclick="loadProfile(${profile.id})" style="font-size: 11px; padding: 2px 6px; margin-right: 5px;">Load</button>
-                    <button onclick="deleteProfile(${profile.id})" style="font-size: 11px; padding: 2px 6px; background: #dc3545; color: white; border: none;">Delete</button>
-                </div>`;
+                `;
             });
-            profileListDiv.innerHTML = html;
-        } else {
-            profileListDiv.innerHTML = '<p style="font-size: 12px; color: #666;">No saved profiles yet.</p>';
+
+            if (segments.length > 8) {
+                html += `<div class="segment-item">+ ${segments.length - 8} more segments</div>`;
+            }
         }
-    } catch (error) {
-        console.error('Failed to load profiles:', error);
-        document.getElementById('profile-list').innerHTML = '<p style="font-size: 12px; color: #666;">Error loading profiles.</p>';
-    }
+
+        html += '</div>';
+    });
+
+    segmentList.innerHTML = html;
 }
 
-async function loadProfile(profileId) {
-    try {
-        const response = await fetch('/get_profiles');
-        const data = await response.json();
+function zoomAllRoutes() {
+    const layers = Object.values(routeLayers).filter(layer => layer !== null);
+    if (layers.length === 0) return;
 
-        const profile = data.profiles.find(p => p.id === profileId);
-        if (profile) {
-            // Load profile settings into the UI
-            document.getElementById('slope').value = profile.max_slope;
-            document.getElementById('slopeValue').textContent = profile.max_slope;
-
-            document.getElementById('comfort').value = profile.comfort_weight;
-            document.getElementById('comfortValue').textContent = profile.comfort_weight;
-
-            // Update checkboxes
-            document.getElementById('gravel').checked = profile.disliked_surfaces.includes('gravel');
-
-            alert(`Profile "${profile.profile_name}" loaded successfully!`);
-        }
-    } catch (error) {
-        console.error('Failed to load profile:', error);
-        alert('Failed to load profile. Please try again.');
-    }
+    const group = L.featureGroup(layers);
+    map.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 18, animate: true });
 }
 
-async function deleteProfile(profileId) {
-    if (!confirm('Are you sure you want to delete this profile?')) {
-        return;
-    }
+function focusRoute(routeType) {
+    const layer = routeLayers[routeType];
+    if (!layer) return;
 
-    try {
-        const response = await fetch(`/delete_profile/${profileId}`, {
-            method: 'DELETE',
+    Object.entries(routeLayers).forEach(([type, line]) => {
+        if (!line) return;
+        line.setStyle({
+            opacity: type === routeType ? 1 : 0.2,
+            weight: type === routeType ? 7 : 4
         });
+    });
 
-        const result = await response.json();
-        if (result.success) {
-            alert('Profile deleted successfully!');
-            loadProfiles(); // Refresh the profile list
-        } else {
-            alert('Error deleting profile: ' + result.error);
-        }
-    } catch (error) {
-        console.error('Failed to delete profile:', error);
-        alert('Failed to delete profile. Please try again.');
-    }
-}
-
-async function handleRouteCalculation() {
-    // This function is now only used for marker dragging
-    // The actual route calculation is handled by calculateAllRoutes()
+    map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 19, animate: true });
 }
 
 function toggleRouteVisibility(routeType) {
@@ -396,31 +356,62 @@ function toggleRouteVisibility(routeType) {
 function showAllRoutes() {
     visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
     updateRouteVisibility();
+    zoomAllRoutes();
 }
 
 function updateRouteVisibility() {
-    Object.keys(currentRoutes).forEach(routeType => {
-        const routeData = currentRoutes[routeType];
+    Object.keys(routeLayers).forEach(routeType => {
+        const layer = routeLayers[routeType];
+        if (!layer) return;
+
         if (visibleRoutes.has(routeType)) {
-            if (!map.hasLayer(routeData.line)) {
-                routeData.line.addTo(map);
-            }
+            if (!map.hasLayer(layer)) layer.addTo(map);
         } else {
-            if (map.hasLayer(routeData.line)) {
-                map.removeLayer(routeData.line);
-            }
+            if (map.hasLayer(layer)) map.removeLayer(layer);
         }
     });
 
-    // Update button styles to show active state
     document.querySelectorAll('.route-btn').forEach(btn => {
         const routeType = btn.dataset.route;
-        if (visibleRoutes.has(routeType)) {
-            btn.style.opacity = '1';
-            btn.style.fontWeight = 'bold';
-        } else {
-            btn.style.opacity = '0.5';
-            btn.style.fontWeight = 'normal';
-        }
+        if (!routeType || routeType === 'all') return;
+        btn.classList.toggle('active', visibleRoutes.has(routeType));
     });
+}
+
+async function saveCurrentProfile() {
+    const profileName = prompt('Enter a name for this profile:');
+    if (!profileName || profileName.trim() === '') return;
+
+    const dislikedSurfaces = [];
+    if (document.getElementById('gravel').checked) dislikedSurfaces.push('gravel');
+
+    const profileData = {
+        profile_name: profileName.trim(),
+        max_slope: parseFloat(document.getElementById('slope').value),
+        disliked_surfaces: dislikedSurfaces,
+        comfort_weight: parseFloat(document.getElementById('comfort').value)
+    };
+
+    try {
+        const response = await fetch('/create_profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profileData)
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            alert('Profile saved successfully!');
+            loadProfiles();
+        } else {
+            alert('Error saving profile: ' + result.error);
+        }
+    } catch (error) {
+        console.error('Failed to save profile:', error);
+        alert('Failed to save profile.');
+    }
+}
+
+async function handleRouteCalculation() {
+    // optional auto-recalculate hook
 }
