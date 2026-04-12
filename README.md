@@ -82,6 +82,8 @@ pip install -r requirements.txt
 python app.py
 4. Open in Browser
 http://localhost:5000
+
+
 📂 Project Structure
 smart_planner/
 │── static/            # Frontend assets (CSS, JS)
