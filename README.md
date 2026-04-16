@@ -33,6 +33,10 @@ User profiles define:
 Maximum slope tolerance
 Preferred/disliked surfaces
 Routes adapt dynamically based on user needs
+<img width="1679" height="824" alt="Screenshot 2026-04-01 184634" src="https://github.com/user-attachments/assets/e2447741-a85e-4d8b-a744-ea343426c8b3" />
+
+
+
 🤖 4. Machine Learning (Risk Prediction)
 Logistic Regression model
 Predicts obstacle probability using:
@@ -46,6 +50,11 @@ Distance
 Safety
 Comfort
 Accessibility
+
+<img width="1919" height="861" alt="Screenshot 2026-04-01 191638" src="https://github.com/user-attachments/assets/e4308dcf-2137-4162-b328-8857b895d9e9" />
+<img width="448" height="856" alt="Screenshot 2026-04-01 184013" src="https://github.com/user-attachments/assets/abddf5f4-d712-4ede-a98b-9314b91b6be7" />
+
+
 🏗️ Tech Stack
 Layer	Technology
 Backend	Flask
@@ -82,6 +91,8 @@ pip install -r requirements.txt
 python app.py
 4. Open in Browser
 http://localhost:5000
+
+
 📂 Project Structure
 smart_planner/
 │── static/            # Frontend assets (CSS, JS)
