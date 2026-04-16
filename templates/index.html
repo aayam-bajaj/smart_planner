@@ -80,7 +80,29 @@
     </aside>
 
     <main class="flex-1 relative">
-      <div id="map"></div>
+      <div class="search-panel">
+    <div class="search-box">
+        <label for="start-search">Start location</label>
+        <div class="search-row">
+            <input type="text" id="start-search" placeholder="Search start location">
+            <button type="button" id="start-search-btn">Set Start</button>
+        </div>
+        <div id="start-suggestions" class="suggestions"></div>
+    </div>
+
+    <div class="search-box">
+        <label for="end-search">End location</label>
+        <div class="search-row">
+            <input type="text" id="end-search" placeholder="Search end location">
+            <button type="button" id="end-search-btn">Set End</button>
+        </div>
+        <div id="end-suggestions" class="suggestions"></div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+      
     </main>
   </div>
 

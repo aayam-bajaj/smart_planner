@@ -196,3 +196,110 @@ html {
 .map-toolbar button {
     pointer-events: auto;
 }
+
+
+.search-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.search-box {
+    background: white;
+    padding: 12px;
+    border-radius: 14px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    position: relative;
+}
+
+.search-box label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.search-row {
+    display: flex;
+    gap: 8px;
+}
+
+.search-row input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    outline: none;
+}
+
+.search-row button {
+    padding: 10px 14px;
+    border: none;
+    border-radius: 10px;
+    background: #2563eb;
+    color: white;
+    cursor: pointer;
+}
+
+.suggestions {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    top: 92px;
+    z-index: 9999;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    overflow: hidden;
+    display: none;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.suggestion-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #f3f4f6;
+    font-size: 0.95rem;
+}
+
+.suggestion-item:hover {
+    background: #f9fafb;
+}
+
+#map {
+    height: 70vh;
+    width: 100%;
+    border-radius: 16px;
+}
+
+
+.route-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+.route-card-btn {
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    padding: 12px;
+    background: white;
+    cursor: pointer;
+}
+
+.route-card-btn.active {
+    border: 2px solid blue;
+}
+
+.details-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 10px 0;
+}
+
+.segment-row {
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+}

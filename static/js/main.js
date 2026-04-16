@@ -1,4 +1,13 @@
+
 const map = L.map('map').setView([19.0330, 73.0297], 13);
+let markerLayer = L.layerGroup().addTo(map);
+let routeLayer = L.layerGroup().addTo(map);
+
+let currentStart = null;
+let currentEnd = null;
+let searchMode = null; // "start" or "end"
+
+
 map.whenReady(() => {
     setTimeout(() => {
         map.invalidateSize();
@@ -31,6 +40,114 @@ let routeLayers = {
 };
 let routeDataByType = {};
 let visibleRoutes = new Set(['fastest', 'comfortable', 'accessible']);
+let activeRouteType = 'fastest';
+let latestRouteStats = [];
+
+function formatDistanceMeters(meters) {
+    return `${(meters / 1000).toFixed(2)} km`;
+}
+
+function formatMinutes(minutes) {
+    return `${Math.round(minutes)} min`;
+}
+
+function setActiveRouteCard(routeType) {
+    document.querySelectorAll('.route-card-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.route === routeType);
+    });
+}
+
+function setStartPoint(latlng, label = "Start") {
+    if (startMarker) {
+        markerLayer.removeLayer(startMarker);
+    }
+
+    startMarker = L.marker([latlng.lat, latlng.lng], { draggable: true })
+        .addTo(markerLayer)
+        .bindPopup(label);
+
+    startMarker.on('dragend', () => {
+        const pos = startMarker.getLatLng();
+        currentStart = { lat: pos.lat, lng: pos.lng };
+    });
+
+    currentStart = { lat: latlng.lat, lng: latlng.lng };
+    info.update('Start selected. Now select end point.');
+}
+
+function setEndPoint(latlng, label = "End") {
+    if (endMarker) {
+        markerLayer.removeLayer(endMarker);
+    }
+
+    endMarker = L.marker([latlng.lat, latlng.lng], { draggable: true })
+        .addTo(markerLayer)
+        .bindPopup(label);
+
+    endMarker.on('dragend', () => {
+        const pos = endMarker.getLatLng();
+        currentEnd = { lat: pos.lat, lng: pos.lng };
+    });
+
+    currentEnd = { lat: latlng.lat, lng: latlng.lng };
+    info.update('End selected. Click "Calculate Routes".');
+}
+
+async function searchPlaces(query) {
+    if (!query || query.trim().length < 3) return [];
+
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(query)}&limit=5`;
+
+    const res = await fetch(url, {
+        headers: {
+            'Accept': 'application/json'
+        }
+    });
+
+    if (!res.ok) return [];
+    return await res.json();
+}
+
+function renderSuggestions(containerId, results, kind) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!results.length) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
+
+    container.innerHTML = results.map((place, index) => `
+        <div class="suggestion-item" data-kind="${kind}" data-lat="${place.lat}" data-lon="${place.lon}" data-name="${place.display_name}">
+            ${place.display_name}
+        </div>
+    `).join('');
+
+    container.style.display = 'block';
+
+    container.querySelectorAll('.suggestion-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const latlng = {
+                lat: parseFloat(item.dataset.lat),
+                lng: parseFloat(item.dataset.lon)
+            };
+            const name = item.dataset.name;
+
+            if (kind === 'start') {
+                setStartPoint(latlng, `Start: ${name}`);
+                document.getElementById('start-search').value = name;
+                document.getElementById('start-suggestions').style.display = 'none';
+            } else {
+                setEndPoint(latlng, `End: ${name}`);
+                document.getElementById('end-search').value = name;
+                document.getElementById('end-suggestions').style.display = 'none';
+            }
+
+            map.setView([latlng.lat, latlng.lng], 16);
+        });
+    });
+}
 
 const slopeSlider = document.getElementById('slope');
 const comfortSlider = document.getElementById('comfort');
@@ -87,23 +204,103 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 });
 
+
+//SeachBOX
+function setupSearchBox(inputId, buttonId, suggestionsId, kind) {
+    const input = document.getElementById(inputId);
+    const button = document.getElementById(buttonId);
+    const suggestions = document.getElementById(suggestionsId);
+
+    let debounceTimer = null;
+
+    input.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+
+        debounceTimer = setTimeout(async () => {
+            const query = input.value.trim();
+            if (query.length < 3) {
+                suggestions.style.display = 'none';
+                suggestions.innerHTML = '';
+                return;
+            }
+
+            const results = await searchPlaces(query);
+            renderSuggestions(suggestionsId, results, kind);
+        }, 350);
+    });
+
+    button.addEventListener('click', async () => {
+        const query = input.value.trim();
+        const results = await searchPlaces(query);
+
+        if (!results.length) {
+            alert('No location found.');
+            return;
+        }
+
+        const first = results[0];
+        const latlng = {
+            lat: parseFloat(first.lat),
+            lng: parseFloat(first.lon)
+        };
+
+        if (kind === 'start') {
+            setStartPoint(latlng, `Start: ${first.display_name}`);
+        } else {
+            setEndPoint(latlng, `End: ${first.display_name}`);
+        }
+
+        map.setView([latlng.lat, latlng.lng], 16);
+        suggestions.style.display = 'none';
+        suggestions.innerHTML = '';
+    });
+
+    input.addEventListener('focus', () => {
+        if (suggestions.children.length > 0) {
+            suggestions.style.display = 'block';
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!input.contains(e.target) && !suggestions.contains(e.target)) {
+            suggestions.style.display = 'none';
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    setupSearchBox('start-search', 'start-search-btn', 'start-suggestions', 'start');
+    setupSearchBox('end-search', 'end-search-btn', 'end-suggestions', 'end');
+});
+
+
 map.on('click', function (e) {
     console.log("Map clicked at:", e.latlng);
 
-    if (!startMarker) {
-        startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        startMarker.bindPopup('Start').openPopup();
-        info.update('Start selected. Now select end point.');
-    } else if (!endMarker) {
-        endMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        endMarker.bindPopup('End').openPopup();
-        info.update('End selected. Click "Calculate Routes".');
-    } else {
-        clearSelectionOnly();
-        startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
-        startMarker.bindPopup('Start').openPopup();
-        info.update('Start reset. Select end point again.');
-    }
+    // if (!startMarker) {
+    //     startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
+    //     startMarker.bindPopup('Start').openPopup();
+    //     info.update('Start selected. Now select end point.');
+    // } else if (!endMarker) {
+    //     endMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
+    //     endMarker.bindPopup('End').openPopup();
+    //     info.update('End selected. Click "Calculate Routes".');
+    // } else {
+    //     clearSelectionOnly();
+    //     startMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
+    //     startMarker.bindPopup('Start').openPopup();
+    //     info.update('Start reset. Select end point again.');
+    // }
+    map.on('click', function (e) {
+        if (!startMarker) {
+            setStartPoint(e.latlng, 'Start');
+        } else if (!endMarker) {
+            setEndPoint(e.latlng, 'End');
+        } else {
+            clearSelectionOnly();
+            setStartPoint(e.latlng, 'Start');
+        }
+    });
 });
 
 map.on('contextmenu', async function (e) {
@@ -165,10 +362,13 @@ async function calculateAllRoutes() {
         return;
     }
 
-    clearAllRoutes();
+    
 
-    const startPoint = startMarker.getLatLng();
-    const endPoint = endMarker.getLatLng();
+    // const startPoint = startMarker.getLatLng();
+    // const endPoint = endMarker.getLatLng();
+
+    const startPoint = currentStart || startMarker?.getLatLng();
+    const endPoint = currentEnd || endMarker?.getLatLng();
 
     const dislikedSurfaces = [];
     if (document.getElementById('gravel').checked) dislikedSurfaces.push('gravel');
@@ -225,7 +425,12 @@ async function calculateAllRoutes() {
                 opacity: 0.9
             }).addTo(map);
 
-            polyline.on('click', () => focusRoute(routeType));
+            polyline.on('click', () => {
+                activeRouteType = routeType;
+                setActiveRouteCard(routeType);
+                showRouteDetails(routeType);
+                focusRoute(routeType);
+            });
 
             routeLayers[routeType] = polyline;
             routeDataByType[routeType] = data;
@@ -242,83 +447,102 @@ async function calculateAllRoutes() {
             console.error(`Failed to calculate ${routeType} route:`, error);
         }
     }
-
     displayRouteComparison(routeStats);
-    updateRouteVisibility();
 
-    clearSelectionOnly();
+    activeRouteType = routeStats[0]?.type || 'fastest';
+    setActiveRouteCard(activeRouteType);
+    showRouteDetails(activeRouteType);
+
+    
     zoomAllRoutes();
     info.update('Routes calculated. Use the buttons to zoom or focus a route.');
 }
 
 function displayRouteComparison(routeStats) {
+    latestRouteStats = routeStats;
+
     const comparisonDiv = document.getElementById('route-comparison');
     const statsDiv = document.getElementById('route-stats');
-    const segmentList = document.getElementById('segment-list');
 
     if (routeStats.length === 0) {
-        statsDiv.innerHTML = '<div>No routes could be calculated.</div>';
-        segmentList.innerHTML = '';
-        comparisonDiv.style.display = 'block';
+        statsDiv.innerHTML = `<div>No routes found</div>`;
         return;
     }
 
-    let html = '';
-    routeStats.forEach(route => {
+    statsDiv.innerHTML = `
+        <h2>Route Comparison</h2>
+        <div class="route-grid">
+            ${routeStats.map(route => {
         const s = route.stats;
-        html += `
-            <div class="route-card" style="border-left: 5px solid ${route.color};">
-                <h3>${route.name}</h3>
-                <div>Distance: ${(s.length / 1000).toFixed(2)} km</div>
-                <div>Time: ${s.estimated_time} min</div>
-                <div>Average Slope: ${Number(s.avg_slope).toFixed(1)}%</div>
-                <div>Max Slope: ${Number(s.max_slope).toFixed(1)}%</div>
-                <div>Obstacles: ${s.obstacle_count}</div>
-                <div>Accessibility Score: ${s.accessibility_score}/100</div>
-                <div style="margin-top:10px;">
-                    <button class="route-btn" onclick="focusRoute('${route.type}')">Zoom To Route</button>
-                </div>
-            </div>
-        `;
+        return `
+                    <button class="route-card-btn" data-route="${route.type}">
+                        <h3>${route.name}</h3>
+                        <div>📏 ${formatDistanceMeters(s.length)}</div>
+                        <div>⏱ ${formatMinutes(s.estimated_time)}</div>
+                        <div>📈 ${s.avg_slope.toFixed(1)}%</div>
+                        <div>⭐ ${s.accessibility_score}/100</div>
+                    </button>
+                `;
+    }).join('')}
+        </div>
+    `;
+
+    comparisonDiv.style.display = 'block';
+
+    // click handling
+    statsDiv.querySelectorAll('.route-card-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const routeType = btn.dataset.route;
+            activeRouteType = routeType;
+
+            setActiveRouteCard(routeType);
+            showRouteDetails(routeType);
+            focusRoute(routeType);
+        });
     });
 
-    statsDiv.innerHTML = html;
-    comparisonDiv.style.display = 'block';
-    renderSegmentList(routeStats);
+    // default selection
+    activeRouteType = routeStats[0].type;
+    setActiveRouteCard(activeRouteType);
+    showRouteDetails(activeRouteType);
 }
 
-function renderSegmentList(routeStats) {
+function showRouteDetails(routeType) {
     const segmentList = document.getElementById('segment-list');
-    let html = '<h3 style="margin-top:14px;">Segment Details</h3>';
+    const route = latestRouteStats.find(r => r.type === routeType);
 
-    routeStats.forEach(route => {
-        html += `<div class="route-card"><h3>${route.name} Segments</h3>`;
+    if (!route) {
+        segmentList.innerHTML = `<div>No route selected</div>`;
+        return;
+    }
 
-        const segments = route.segments || [];
-        if (segments.length === 0) {
-            html += '<div class="segment-item">No segment data available.</div>';
-        } else {
-            segments.slice(0, 8).forEach(seg => {
-                html += `
-                    <div class="segment-item">
-                        <b>Segment ${seg.index}</b><br/>
-                        Type: ${seg.highway_type}<br/>
-                        Surface: ${seg.surface}<br/>
-                        Length: ${seg.length.toFixed(1)} m<br/>
-                        Slope: ${seg.slope.toFixed(1)}%
+    const s = route.stats;
+    const segments = route.segments || [];
+
+    segmentList.innerHTML = `
+        <h2>${route.name}</h2>
+        <div>📏 ${formatDistanceMeters(s.length)} | ⏱ ${formatMinutes(s.estimated_time)}</div>
+
+        <div class="details-grid">
+            <div>Accessibility: ${s.accessibility_score}</div>
+            <div>Avg slope: ${s.avg_slope.toFixed(1)}%</div>
+            <div>Max slope: ${s.max_slope.toFixed(1)}%</div>
+            <div>Obstacles: ${s.obstacle_count}</div>
+        </div>
+
+        <h3>Segments</h3>
+
+        <div class="segment-list-modern">
+            ${segments.slice(0, 10).map(seg => `
+                    <div class="segment-row">
+                        <b>${seg.index}</b> | ${seg.highway_type}
+                        <br/>
+                        ${seg.length.toFixed(1)}m | ${seg.slope.toFixed(1)}% | ${seg.surface}
                     </div>
-                `;
-            });
-
-            if (segments.length > 8) {
-                html += `<div class="segment-item">+ ${segments.length - 8} more segments</div>`;
-            }
+                `).join('')
         }
-
-        html += '</div>';
-    });
-
-    segmentList.innerHTML = html;
+        </div>
+    `;
 }
 
 function zoomAllRoutes() {
