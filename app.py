@@ -455,18 +455,18 @@ def calculate_custom_cost(G, u, v, user_profile, obstacles=None, current_weather
     return cost
 
 # --- Flask Routes ---
-# @app.route('/')
-# def index():
-#     return render_template('index.html')
+@app.route('/')
+def index():
+    return render_template('home.html')
 
 
 
 #routes for login
-@app.route("/")
-def home():
-    if current_user.is_authenticated:
-        return redirect(url_for("map_page"))
-    return redirect(url_for("login"))
+# @app.route("/")
+# def home():
+#     if current_user.is_authenticated:
+#         return redirect(url_for("map_page"))
+#     return redirect(url_for("login"))
 
 
 @app.route("/register", methods=["GET", "POST"])
